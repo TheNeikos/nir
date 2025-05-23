@@ -1,5 +1,6 @@
-let 
-  foo = 2;
+let
   bar = 3;
+  mul = x: x * 3;
+  square = x: x * x;
 in
-  foo + bar
+mul (square bar) 2

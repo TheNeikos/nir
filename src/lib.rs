@@ -127,7 +127,20 @@ pub enum Value<'db> {
     Float(OrderedFloat<f64>),
     Bool(bool),
     String(StringWithContext<'db>),
+    Function(Function<'db>),
     Null,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct Function<'db> {
+    expr: NixExprId<'db>,
+    ctx: NixVarContext<'db>,
+}
+
+impl<'db> Function<'db> {
+    fn evaluate(&self, db: &'db dyn Db, value: NixValue<'db>) -> NixValue<'db> {
+        NixValue::new(db, Value::Null, value.addr(db))
+    }
 }
 
 impl<'db> Value<'db> {
@@ -216,6 +229,7 @@ pub fn get_value<'db>(db: &'db dyn Db, val: NixValue<'db>) -> Value<'db> {
 }
 
 #[salsa::tracked]
+#[derive(Debug)]
 pub struct NixVarContext<'db> {
     addr: NixAddr<'db>,
     own_vals: BTreeMap<String, NixAddr<'db>>,
@@ -256,6 +270,7 @@ impl<'db> NixVarContext<'db> {
 }
 
 #[salsa::tracked]
+#[derive(Debug)]
 pub struct NixExprId<'db> {
     addr: NixAddr<'db>,
     ctx: NixVarContext<'db>,
@@ -304,23 +319,22 @@ impl<'db> ExprEvaluation<'db> {
                 let left = eval_expression(db, left);
                 let right = eval_expression(db, right);
 
-                match bin_op.operator().unwrap() {
-                    rnix::ast::BinOpKind::Add => {
-                        let left = left
-                            .value(db)
-                            .value(db)
-                            .as_number()
-                            .copied()
-                            .unwrap_or_default();
-                        let right = right
-                            .value(db)
-                            .value(db)
-                            .as_number()
-                            .copied()
-                            .unwrap_or_default();
+                let left = left
+                    .value(db)
+                    .value(db)
+                    .as_number()
+                    .copied()
+                    .unwrap_or_default();
+                let right = right
+                    .value(db)
+                    .value(db)
+                    .as_number()
+                    .copied()
+                    .unwrap_or_default();
 
-                        Value::Number(left + right)
-                    }
+                match bin_op.operator().unwrap() {
+                    rnix::ast::BinOpKind::Add => Value::Number(left + right),
+                    rnix::ast::BinOpKind::Mul => Value::Number(left * right),
                     e => panic!("Not supported: {:?}", e),
                 }
             }
@@ -337,6 +351,33 @@ impl<'db> ExprEvaluation<'db> {
                 let expr_id: NixExprId<'db> = self.ctx.resolve(db, name);
 
                 return eval_expression(db, expr_id);
+            }
+            Expr::Paren(paren) => {
+                let addr = NixAddr::with(db, self.addr, paren.expr().unwrap().syntax().clone());
+                let expr_id = NixExprId::new(db, addr, self.ctx);
+
+                return eval_expression(db, expr_id);
+            }
+            Expr::Lambda(lambda) => {}
+            Expr::Apply(apply) => {
+                let lambda = NixAddr::with(db, self.addr, apply.lambda().unwrap().syntax().clone());
+                let argument =
+                    NixAddr::with(db, self.addr, apply.argument().unwrap().syntax().clone());
+
+                let lambda = find_expr(db, lambda, self.ctx);
+                let argument = find_expr(db, argument, self.ctx);
+
+                let lambda = eval_expression(db, lambda);
+                let argument = eval_expression(db, argument);
+
+                let lambda = lambda.value(db).value(db);
+
+                match lambda {
+                    Value::Function(func) => {
+                        return NixEvalResult::new(db, func.evaluate(db, argument.value(db)));
+                    }
+                    _ => panic!("Not a function..."),
+                }
             }
             e => panic!("Not supported: {:?}", e),
         };
